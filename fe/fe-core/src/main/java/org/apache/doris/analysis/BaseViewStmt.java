@@ -95,6 +95,9 @@ public class BaseViewStmt extends DdlStmt {
     protected void checkQueryAuth() throws UserException {
         for (int i = 0; i < viewDefStmt.getBaseTblResultExprs().size(); ++i) {
             Expr expr = viewDefStmt.getBaseTblResultExprs().get(i);
+            finalCols.add(new Column(viewDefStmt.getColLabels().get(i),
+                    expr.getType(),
+                    expr.isNullable()));
             if (!(expr instanceof SlotRef)) {
                 continue;
             }
@@ -132,8 +135,10 @@ public class BaseViewStmt extends DdlStmt {
             }
         } else {
             for (int i = 0; i < viewDefStmt.getBaseTblResultExprs().size(); ++i) {
-                Type type = viewDefStmt.getBaseTblResultExprs().get(i).getType();
-                finalCols.add(new Column(viewDefStmt.getColLabels().get(i), type));
+                Expr exprs = viewDefStmt.getBaseTblResultExprs().get(i);
+                finalCols.add(new Column(viewDefStmt.getColLabels().get(i),
+                        exprs.getType(),
+                        exprs.isNullable()));
             }
         }
         // Set for duplicate columns
