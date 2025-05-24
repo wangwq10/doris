@@ -136,14 +136,19 @@ public class HiveMetaStoreCache {
      * we need to be very careful and try to avoid the circular dependency of these tasks
      * which will bring out thread deadlock.
      **/
-    private void init() {
+    public void init() {
+        long partitionCacheTtlSecond = NumberUtils.toLong(
+                (catalog.getProperties().get(HMSExternalCatalog.PARTITION_CACHE_TTL_SECOND)),
+                HMSExternalCatalog.CACHE_NO_TTL);
+
         CacheFactory partitionValuesCacheFactory = new CacheFactory(
-                OptionalLong.of(28800L),
+                OptionalLong.of(partitionCacheTtlSecond >= HMSExternalCatalog.CACHE_TTL_DISABLE_CACHE
+                        ? partitionCacheTtlSecond : 28800L),
                 OptionalLong.of(Config.external_cache_expire_time_minutes_after_access * 60L),
                 Config.max_hive_partition_table_cache_num,
                 true,
                 null);
-        partitionValuesCache = partitionValuesCacheFactory.buildCache(key -> loadPartitionValues(key), null,
+        partitionValuesCache = partitionValuesCacheFactory.buildCache(this::loadPartitionValues, null,
                 refreshExecutor);
 
         CacheFactory partitionCacheFactory = new CacheFactory(
@@ -170,16 +175,16 @@ public class HiveMetaStoreCache {
     /***
      * generate a filecache and set to fileCacheRef
      */
-    public void setNewFileCache() {
+    private void setNewFileCache() {
         // init or refresh job conf
         setJobConf();
         // if the file.meta.cache.ttl-second is equal or greater than 0, the cache expired will be set to that value
         int fileMetaCacheTtlSecond = NumberUtils.toInt(
                 (catalog.getProperties().get(HMSExternalCatalog.FILE_META_CACHE_TTL_SECOND)),
-                HMSExternalCatalog.FILE_META_CACHE_NO_TTL);
+                HMSExternalCatalog.CACHE_NO_TTL);
 
         CacheFactory fileCacheFactory = new CacheFactory(
-                OptionalLong.of(fileMetaCacheTtlSecond >= HMSExternalCatalog.FILE_META_CACHE_TTL_DISABLE_CACHE
+                OptionalLong.of(fileMetaCacheTtlSecond >= HMSExternalCatalog.CACHE_TTL_DISABLE_CACHE
                         ? fileMetaCacheTtlSecond : 28800L),
                 OptionalLong.of(Config.external_cache_expire_time_minutes_after_access * 60L),
                 Config.max_external_file_cache_num,
@@ -349,10 +354,11 @@ public class HiveMetaStoreCache {
             List<String> partitionValues,
             String bindBrokerName) throws UserException {
         FileCacheValue result = new FileCacheValue();
+        Map<String, String> properties = catalog.getCatalogProperty().getProperties();
         RemoteFileSystem fs = Env.getCurrentEnv().getExtMetaCacheMgr().getFsCache().getRemoteFileSystem(
                 new FileSystemCache.FileSystemCacheKey(LocationPath.getFSIdentity(
-                        location, bindBrokerName),
-                        catalog.getCatalogProperty().getProperties(),
+                        location, properties, bindBrokerName),
+                        properties,
                         bindBrokerName, jobConf));
         result.setSplittable(HiveUtil.isSplittable(fs, inputFormat, location));
         // For Tez engine, it may generate subdirectoies for "union" query.
@@ -404,7 +410,8 @@ public class HiveMetaStoreCache {
             } catch (Exception e) {
                 LOG.warn("unknown scheme in path: " + finalLocation, e);
             }
-            FileInputFormat.setInputPaths(jobConf, finalLocation.get());
+            // NOTICE: the setInputPaths has 2 overloads, the 2nd arg should be Path not String
+            FileInputFormat.setInputPaths(jobConf, finalLocation.getPath());
             try {
                 FileCacheValue result = getFileCache(finalLocation.get(), key.inputFormat, jobConf,
                         key.getPartitionValues(), key.bindBrokerName);
@@ -736,8 +743,8 @@ public class HiveMetaStoreCache {
             boolean isFullAcid, boolean skipCheckingAcidVersionFile, long tableId, String bindBrokerName) {
         List<FileCacheValue> fileCacheValues = Lists.newArrayList();
         try {
+            Map<String, String> properties = catalog.getCatalogProperty().getProperties();
             for (HivePartition partition : partitions) {
-
                 AuthenticationConfig authenticationConfig = AuthenticationConfig.getKerberosConfig(jobConf);
                 HadoopAuthenticator hadoopAuthenticator =
                         HadoopAuthenticator.getHadoopAuthenticator(authenticationConfig);
@@ -770,7 +777,7 @@ public class HiveMetaStoreCache {
                         RemoteFileSystem fs = Env.getCurrentEnv().getExtMetaCacheMgr().getFsCache().getRemoteFileSystem(
                                 new FileSystemCache.FileSystemCacheKey(
                                         LocationPath.getFSIdentity(baseOrDeltaPath.toUri().toString(),
-                                                bindBrokerName),
+                                                properties, bindBrokerName),
                                         catalog.getCatalogProperty().getProperties(),
                                         bindBrokerName, jobConf));
                         Status status = fs.exists(acidVersionPath);
@@ -797,7 +804,7 @@ public class HiveMetaStoreCache {
                     String location = delta.getPath().toString();
                     RemoteFileSystem fs = Env.getCurrentEnv().getExtMetaCacheMgr().getFsCache().getRemoteFileSystem(
                             new FileSystemCache.FileSystemCacheKey(
-                                    LocationPath.getFSIdentity(location, bindBrokerName),
+                                    LocationPath.getFSIdentity(location, properties, bindBrokerName),
                                             catalog.getCatalogProperty().getProperties(), bindBrokerName, jobConf));
                     List<RemoteFile> remoteFiles = new ArrayList<>();
                     Status status = fs.listFiles(location, false, remoteFiles);
@@ -825,7 +832,7 @@ public class HiveMetaStoreCache {
                     String location = directory.getBaseDirectory().toString();
                     RemoteFileSystem fs = Env.getCurrentEnv().getExtMetaCacheMgr().getFsCache().getRemoteFileSystem(
                             new FileSystemCache.FileSystemCacheKey(
-                                    LocationPath.getFSIdentity(location, bindBrokerName),
+                                    LocationPath.getFSIdentity(location, properties, bindBrokerName),
                                             catalog.getCatalogProperty().getProperties(), bindBrokerName, jobConf));
                     List<RemoteFile> remoteFiles = new ArrayList<>();
                     Status status = fs.listFiles(location, false, remoteFiles);

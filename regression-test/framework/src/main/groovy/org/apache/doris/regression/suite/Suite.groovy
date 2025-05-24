@@ -33,6 +33,7 @@ import groovy.json.JsonSlurper
 import com.google.common.collect.ImmutableList
 import org.apache.commons.lang3.ObjectUtils
 import org.apache.doris.regression.Config
+import org.apache.doris.regression.RegressionTest
 import org.apache.doris.regression.action.BenchmarkAction
 import org.apache.doris.regression.action.ProfileAction
 import org.apache.doris.regression.action.WaitForAction
@@ -262,6 +263,11 @@ class Suite implements GroovyInterceptable {
     public void docker(ClusterOptions options = new ClusterOptions(), Closure actionSupplier) throws Exception {
         if (context.config.excludeDockerTest) {
             return
+        }
+
+        if (RegressionTest.getGroupExecType(group) != RegressionTest.GroupExecType.DOCKER) {
+            throw new Exception("Need to add 'docker' to docker suite's belong groups, "
+                    + "see example demo_p0/docker_action.groovy")
         }
 
         boolean pipelineIsCloud = isCloudMode()
@@ -1398,7 +1404,49 @@ class Suite implements GroovyInterceptable {
     }
 
     DebugPoint GetDebugPoint() {
+        def execType = RegressionTest.getGroupExecType(group);
+        if (execType != RegressionTest.GroupExecType.SINGLE
+            && execType != RegressionTest.GroupExecType.DOCKER) {
+            throw new Exception("Debug point must use in nonConcurrent suite or docker suite, "
+                    + "need add 'nonConcurrent' or 'docker' to suite's belong groups, "
+                    + "see example demo_p0/debugpoint_action.groovy.")
+        }
         return debugPoint
+    }
+
+    // get follower ip
+    def get_follower_ip = {
+        def result = sql """show frontends;"""
+        if (result.size() == 1) {
+            return null
+        }
+        for (int i = 0; i < result.size(); i++) {
+            if (result[i][7] == "FOLLOWER" && result[i][8] == "false" && result[i][11] == "true") {
+                return result[i][1]
+            }
+        }
+        return null
+    }
+
+    // get master ip
+    def get_master_ip = {
+        def result = sql """show frontends;"""
+        for (int i = 0; i < result.size(); i++) {
+            if (result[i][7] == "FOLLOWER" && result[i][8] == "true" && result[i][11] == "true") {
+                return result[i][1]
+            }
+        }
+        return null
+    }
+
+    def run_on_follower_and_master = { test_fn ->
+        for (def ip in [get_follower_ip(), get_master_ip()]) {
+            if (ip != null) {
+                def jdbc_url = context.config.jdbcUrl.replaceAll(/\/\/[0-9.]+:/, "//${ip}:")
+                logger.info("jdbc_url: " + jdbc_url)
+                test_fn(jdbc_url)
+            }
+        }
     }
 
     def waitingMTMVTaskFinishedByMvName = { mvName, dbName = context.dbName ->
@@ -1625,10 +1673,18 @@ class Suite implements GroovyInterceptable {
         List<List<Object>> resultExpected = sql(foldSql)
         logger.info("result expected: " + resultExpected.toString())
 
-        String errorMsg = OutputUtils.checkOutput(resultExpected.iterator(), resultByFoldConstant.iterator(),
+        String errorMsg = null
+        try {
+            errorMsg = OutputUtils.checkOutput(resultExpected.iterator(), resultByFoldConstant.iterator(),
                     { row -> OutputUtils.toCsvString(row as List<Object>) },
                     { row ->  OutputUtils.toCsvString(row) },
                     "check output failed", meta)
+        } catch (Throwable t) {
+            throw new IllegalStateException("Check output failed, sql:\n${foldSql}. error message: \n${errorMsg}", t)
+        }
+        if (errorMsg != null) {
+            throw new IllegalStateException(errorMsg);
+        }
     }
 
     String getJobName(String dbName, String mtmvName) {
@@ -1879,7 +1935,7 @@ class Suite implements GroovyInterceptable {
             explain {
                 sql("${query_sql}")
                 check { result ->
-                    boolean isContain = result.contains("${mv_name}")
+                    boolean isContain = result.contains("(${mv_name})")
                     Assert.assertFalse(isContain)
                 }
             }
@@ -1903,7 +1959,7 @@ class Suite implements GroovyInterceptable {
                 check { result ->
                     boolean isContain = false;
                     for (String mv_name : mv_names) {
-                        isContain = isContain || result.contains("${mv_name}")
+                        isContain = isContain || result.contains("(${mv_name})")
                     }
                     Assert.assertFalse(isContain)
                 }

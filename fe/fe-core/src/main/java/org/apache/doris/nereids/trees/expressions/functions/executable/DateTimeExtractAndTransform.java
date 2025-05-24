@@ -358,6 +358,26 @@ public class DateTimeExtractAndTransform {
         return DateV2Literal.fromJavaDateType(dateTruncHelper(date.toJavaDateType(), trunc.getValue()));
     }
 
+    @ExecFunction(name = "date_trunc")
+    public static Expression dateTrunc(StringLikeLiteral trunc, DateTimeLiteral date) {
+        return DateTimeLiteral.fromJavaDateType(dateTruncHelper(date.toJavaDateType(), trunc.getValue()));
+    }
+
+    @ExecFunction(name = "date_trunc")
+    public static Expression dateTrunc(StringLikeLiteral trunc, DateTimeV2Literal date) {
+        return DateTimeV2Literal.fromJavaDateType(dateTruncHelper(date.toJavaDateType(), trunc.getValue()));
+    }
+
+    @ExecFunction(name = "date_trunc")
+    public static Expression dateTrunc(StringLikeLiteral trunc, DateLiteral date) {
+        return DateLiteral.fromJavaDateType(dateTruncHelper(date.toJavaDateType(), trunc.getValue()));
+    }
+
+    @ExecFunction(name = "date_trunc")
+    public static Expression dateTrunc(StringLikeLiteral trunc, DateV2Literal date) {
+        return DateV2Literal.fromJavaDateType(dateTruncHelper(date.toJavaDateType(), trunc.getValue()));
+    }
+
     private static LocalDateTime dateTruncHelper(LocalDateTime dateTime, String trunc) {
         int year = dateTime.getYear();
         int month = dateTime.getMonthValue();
@@ -554,14 +574,16 @@ public class DateTimeExtractAndTransform {
     private static String getTimestamp(LocalDateTime dateTime) {
         LocalDateTime specialUpperBound = LocalDateTime.of(2038, 1, 19, 3, 14, 7);
         LocalDateTime specialLowerBound = LocalDateTime.of(1970, 1, 1, 0, 0, 0);
+        dateTime = dateTime.atZone(DateUtils.getTimeZone())
+                        .toOffsetDateTime().atZoneSameInstant(ZoneId.of("UTC+0"))
+                        .toLocalDateTime();
         if (dateTime.isBefore(specialLowerBound) || dateTime.isAfter(specialUpperBound)) {
             return "0";
         }
         Duration duration = Duration.between(
                 specialLowerBound,
-                dateTime.atZone(DateUtils.getTimeZone())
-                        .toOffsetDateTime().atZoneSameInstant(ZoneId.of("UTC+0"))
-                        .toLocalDateTime());
+                dateTime
+                );
         if (duration.getNano() == 0) {
             return String.valueOf(duration.getSeconds());
         } else {

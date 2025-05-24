@@ -183,6 +183,22 @@ public class RollupJobV2 extends AlterJobV2 implements GsonPostProcessable {
         this.storageFormat = storageFormat;
     }
 
+    public long getRollupIndexId() {
+        return rollupIndexId;
+    }
+
+    public String getRollupIndexName() {
+        return rollupIndexName;
+    }
+
+    public long getBaseIndexId() {
+        return baseIndexId;
+    }
+
+    public String getBaseIndexName() {
+        return baseIndexName;
+    }
+
     private void initAnalyzer() throws AnalysisException {
         ConnectContext connectContext = new ConnectContext();
         Database db;
@@ -886,7 +902,11 @@ public class RollupJobV2 extends AlterJobV2 implements GsonPostProcessable {
             stmt.analyze(analyzer);
         } catch (Exception e) {
             // Under normal circumstances, the stmt will not fail to analyze.
-            throw new IOException("error happens when parsing create materialized view stmt: " + stmt, e);
+            // In some cases (such as drop table force), analyze may fail because cancel is
+            // not included in the checkpoint.
+            jobState = JobState.CANCELLED;
+            LOG.warn("error happens when parsing create materialized view stmt: " + stmt, e);
+            return;
         }
         setColumnsDefineExpr(stmt.getMVColumnItemList());
     }

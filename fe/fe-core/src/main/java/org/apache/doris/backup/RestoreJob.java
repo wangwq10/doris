@@ -69,6 +69,7 @@ import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.datasource.property.S3ClientBEProperties;
 import org.apache.doris.resource.Tag;
 import org.apache.doris.task.AgentBatchTask;
+import org.apache.doris.task.AgentBoundedBatchTask;
 import org.apache.doris.task.AgentTask;
 import org.apache.doris.task.AgentTaskExecutor;
 import org.apache.doris.task.AgentTaskQueue;
@@ -663,7 +664,10 @@ public class RestoreJob extends AbstractJob {
         Map<Long, TabletRef> tabletBases = new HashMap<>();
 
         // Check and prepare meta objects.
-        Map<Long, AgentBatchTask> batchTaskPerTable = new HashMap<>();
+        Map<Long, AgentBoundedBatchTask> batchTaskPerTable = new HashMap<>();
+
+        // The tables that are restored but not committed, because the table name may be changed.
+        List<Table> stagingRestoreTables = Lists.newArrayList();
         db.readLock();
         try {
             for (Map.Entry<String, BackupOlapTableInfo> olapTableEntry : jobInfo.backupOlapTableObjects.entrySet()) {
@@ -846,7 +850,7 @@ public class RestoreJob extends AbstractJob {
                     if (LOG.isDebugEnabled()) {
                         LOG.debug("put remote table {} to restoredTbls", remoteOlapTbl.getName());
                     }
-                    restoredTbls.add(remoteOlapTbl);
+                    stagingRestoreTables.add(remoteOlapTbl);
                 }
             } // end of all restore olap tables
 
@@ -875,7 +879,7 @@ public class RestoreJob extends AbstractJob {
                     String srcDbName = jobInfo.dbName;
                     remoteView.resetViewDefForRestore(srcDbName, db.getName());
                     remoteView.resetIdsForRestore(env);
-                    restoredTbls.add(remoteView);
+                    stagingRestoreTables.add(remoteView);
                 }
             }
 
@@ -896,7 +900,7 @@ public class RestoreJob extends AbstractJob {
                     }
                 } else {
                     remoteOdbcTable.resetIdsForRestore(env);
-                    restoredTbls.add(remoteOdbcTable);
+                    stagingRestoreTables.add(remoteOdbcTable);
                 }
             }
 
@@ -917,9 +921,10 @@ public class RestoreJob extends AbstractJob {
                 BackupPartitionInfo backupPartitionInfo
                         = jobInfo.getOlapTableInfo(entry.first).getPartInfo(restorePart.getName());
 
-                AgentBatchTask batchTask = batchTaskPerTable.get(localTbl.getId());
+                AgentBoundedBatchTask batchTask = batchTaskPerTable.get(localTbl.getId());
                 if (batchTask == null) {
-                    batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+                    batchTask = new AgentBoundedBatchTask(
+                            Config.backup_restore_batch_task_num_per_rpc, Config.restore_task_concurrency_per_be);
                     batchTaskPerTable.put(localTbl.getId(), batchTask);
                 }
                 createReplicas(db, batchTask, localTbl, restorePart);
@@ -929,13 +934,14 @@ public class RestoreJob extends AbstractJob {
             }
 
             // generate create replica task for all restored tables
-            for (Table restoreTbl : restoredTbls) {
+            for (Table restoreTbl : stagingRestoreTables) {
                 if (restoreTbl.getType() == TableType.OLAP) {
                     OlapTable restoreOlapTable = (OlapTable) restoreTbl;
                     for (Partition restorePart : restoreOlapTable.getPartitions()) {
-                        AgentBatchTask batchTask = batchTaskPerTable.get(restoreTbl.getId());
+                        AgentBoundedBatchTask batchTask = batchTaskPerTable.get(restoreTbl.getId());
                         if (batchTask == null) {
-                            batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+                            batchTask = new AgentBoundedBatchTask(Config.backup_restore_batch_task_num_per_rpc,
+                                    Config.restore_task_concurrency_per_be);
                             batchTaskPerTable.put(restoreTbl.getId(), batchTask);
                         }
                         createReplicas(db, batchTask, restoreOlapTable, restorePart, tabletBases);
@@ -955,6 +961,7 @@ public class RestoreJob extends AbstractJob {
                     tableName = tableAliasWithAtomicRestore(tableName);
                 }
                 restoreTbl.setName(tableName);
+                restoredTbls.add(restoreTbl);
             }
 
             if (LOG.isDebugEnabled()) {
@@ -985,7 +992,6 @@ public class RestoreJob extends AbstractJob {
                 for (AgentTask task : batchTask.getAllTasks()) {
                     createReplicaTasksLatch.addMark(task.getBackendId(), task.getTabletId());
                     ((CreateReplicaTask) task).setLatch(createReplicaTasksLatch);
-                    AgentTaskQueue.addTask(task);
                 }
                 AgentTaskExecutor.submit(batchTask);
             }
@@ -1183,8 +1189,7 @@ public class RestoreJob extends AbstractJob {
                                         localOlapTbl.getName());
                             }
                         }
-                        tabletBases.put(remoteTablet.getId(),
-                                new TabletRef(localTablet.getId(), schemaHash, storageMedium));
+                        tabletBases.put(remoteTablet.getId(), new TabletRef(localTablet.getId(), schemaHash));
                     }
                 }
             }
@@ -1202,7 +1207,8 @@ public class RestoreJob extends AbstractJob {
         taskProgress.clear();
         taskErrMsg.clear();
         Multimap<Long, Long> bePathsMap = HashMultimap.create();
-        AgentBatchTask batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+        AgentBoundedBatchTask batchTask = new AgentBoundedBatchTask(
+                Config.backup_restore_batch_task_num_per_rpc, Config.restore_task_concurrency_per_be);
         db.readLock();
         try {
             for (Map.Entry<IdChain, IdChain> entry : fileMapping.getMapping().entrySet()) {
@@ -1242,10 +1248,6 @@ public class RestoreJob extends AbstractJob {
             return;
         }
 
-        // send tasks
-        for (AgentTask task : batchTask.getAllTasks()) {
-            AgentTaskQueue.addTask(task);
-        }
         AgentTaskExecutor.submit(batchTask);
         LOG.info("finished to send snapshot tasks, num: {}. {}", batchTask.getTaskNum(), this);
     }
@@ -1332,8 +1334,11 @@ public class RestoreJob extends AbstractJob {
             for (Tablet restoreTablet : restoredIdx.getTablets()) {
                 TabletRef baseTabletRef = tabletBases == null ? null : tabletBases.get(restoreTablet.getId());
                 // All restored replicas will be saved to HDD by default.
-                TStorageMedium storageMedium = baseTabletRef == null
-                        ? TStorageMedium.HDD : baseTabletRef.storageMedium;
+                TStorageMedium storageMedium = TStorageMedium.HDD;
+                if (tabletBases != null) {
+                    // ensure this tablet is bound to the same backend disk as the origin table's tablet.
+                    storageMedium = localTbl.getPartitionInfo().getDataProperty(restorePart.getId()).getStorageMedium();
+                }
                 TabletMeta tabletMeta = new TabletMeta(db.getId(), localTbl.getId(), restorePart.getId(),
                         restoredIdx.getId(), indexMeta.getSchemaHash(), storageMedium);
                 Env.getCurrentInvertedIndex().addTablet(restoreTablet.getId(), tabletMeta);
@@ -1669,7 +1674,8 @@ public class RestoreJob extends AbstractJob {
         unfinishedSignatureToId.clear();
         taskProgress.clear();
         taskErrMsg.clear();
-        AgentBatchTask batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+        AgentBoundedBatchTask batchTask = new AgentBoundedBatchTask(
+                Config.backup_restore_batch_task_num_per_rpc, Config.restore_task_concurrency_per_be);
         for (long dbId : dbToSnapshotInfos.keySet()) {
             List<SnapshotInfo> infos = dbToSnapshotInfos.get(dbId);
 
@@ -1798,10 +1804,6 @@ public class RestoreJob extends AbstractJob {
             }
         }
 
-        // send task
-        for (AgentTask task : batchTask.getAllTasks()) {
-            AgentTaskQueue.addTask(task);
-        }
         AgentTaskExecutor.submit(batchTask);
 
         state = RestoreJobState.DOWNLOADING;
@@ -1821,7 +1823,8 @@ public class RestoreJob extends AbstractJob {
         unfinishedSignatureToId.clear();
         taskProgress.clear();
         taskErrMsg.clear();
-        AgentBatchTask batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+        AgentBoundedBatchTask batchTask = new AgentBoundedBatchTask(
+                Config.backup_restore_batch_task_num_per_rpc, Config.restore_task_concurrency_per_be);
         for (long dbId : dbToSnapshotInfos.keySet()) {
             List<SnapshotInfo> infos = dbToSnapshotInfos.get(dbId);
 
@@ -1964,10 +1967,6 @@ public class RestoreJob extends AbstractJob {
             }
         }
 
-        // send task
-        for (AgentTask task : batchTask.getAllTasks()) {
-            AgentTaskQueue.addTask(task);
-        }
         AgentTaskExecutor.submit(batchTask);
 
         state = RestoreJobState.DOWNLOADING;
@@ -1996,7 +1995,8 @@ public class RestoreJob extends AbstractJob {
         unfinishedSignatureToId.clear();
         taskProgress.clear();
         taskErrMsg.clear();
-        AgentBatchTask batchTask = new AgentBatchTask(Config.backup_restore_batch_task_num_per_rpc);
+        AgentBoundedBatchTask batchTask = new AgentBoundedBatchTask(
+                Config.backup_restore_batch_task_num_per_rpc, Config.restore_task_concurrency_per_be);
         // tablet id->(be id -> download info)
         for (Cell<Long, Long, SnapshotInfo> cell : snapshotInfos.cellSet()) {
             SnapshotInfo info = cell.getValue();
@@ -2008,10 +2008,6 @@ public class RestoreJob extends AbstractJob {
             unfinishedSignatureToId.put(signature, info.getTabletId());
         }
 
-        // send task
-        for (AgentTask task : batchTask.getAllTasks()) {
-            AgentTaskQueue.addTask(task);
-        }
         AgentTaskExecutor.submit(batchTask);
 
         state = RestoreJobState.COMMITTING;
@@ -2775,12 +2771,10 @@ public class RestoreJob extends AbstractJob {
     private static class TabletRef {
         public long tabletId;
         public int schemaHash;
-        public TStorageMedium storageMedium;
 
-        TabletRef(long tabletId, int schemaHash, TStorageMedium storageMedium) {
+        TabletRef(long tabletId, int schemaHash) {
             this.tabletId = tabletId;
             this.schemaHash = schemaHash;
-            this.storageMedium = storageMedium;
         }
     }
 }

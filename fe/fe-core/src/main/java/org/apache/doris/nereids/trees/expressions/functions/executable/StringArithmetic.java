@@ -104,8 +104,8 @@ public class StringArithmetic {
             rightIndex = third + leftIndex;
         }
         // at here leftIndex and rightIndex can not be exceeding boundary
-        int finalLeftIndex = first.codePointCount(0, (int) leftIndex);
-        int finalRightIndex = first.codePointCount(0, (int) rightIndex);
+        int finalLeftIndex = first.offsetByCodePoints(0, (int) leftIndex);
+        int finalRightIndex = first.offsetByCodePoints(0, (int) rightIndex);
         // left index and right index are in integer range because of definition, so we can safely cast it to int
         return first.substring(finalLeftIndex, finalRightIndex);
     }
@@ -132,7 +132,11 @@ public class StringArithmetic {
      */
     @ExecFunction(name = "lower")
     public static Expression lowerVarchar(StringLikeLiteral first) {
-        return castStringLikeLiteral(first, first.getValue().toLowerCase());
+        StringBuilder result = new StringBuilder(first.getValue().length());
+        for (char c : first.getValue().toCharArray()) {
+            result.append(Character.toLowerCase(c));
+        }
+        return castStringLikeLiteral(first, result.toString());
     }
 
     /**
@@ -140,7 +144,11 @@ public class StringArithmetic {
      */
     @ExecFunction(name = "upper")
     public static Expression upperVarchar(StringLikeLiteral first) {
-        return castStringLikeLiteral(first, first.getValue().toUpperCase());
+        StringBuilder result = new StringBuilder(first.getValue().length());
+        for (char c : first.getValue().toCharArray()) {
+            result.append(Character.toUpperCase(c));
+        }
+        return castStringLikeLiteral(first, result.toString());
     }
 
     private static String trimImpl(String first, String second, boolean left, boolean right) {
@@ -304,7 +312,8 @@ public class StringArithmetic {
         } else if (second.getValue() >= inputLength) {
             return first;
         } else {
-            int index = first.getValue().codePointCount(0, second.getValue());
+            // at here leftIndex and rightIndex can not be exceeding boundary
+            int index = first.getValue().offsetByCodePoints(0, second.getValue());
             return castStringLikeLiteral(first, first.getValue().substring(0, index));
         }
     }
@@ -320,14 +329,15 @@ public class StringArithmetic {
         } else if (second.getValue() >= inputLength) {
             return first;
         } else {
+            // at here second can not be exceeding boundary
             if (second.getValue() >= 0) {
-                int index = first.getValue().codePointCount(0, second.getValue());
+                int index = first.getValue().offsetByCodePoints(0, second.getValue());
                 return castStringLikeLiteral(first, first.getValue().substring(
                     inputLength - index, inputLength));
             } else {
-                int index = first.getValue().codePointCount(Math.abs(second.getValue()) - 1, first.getValue().length());
+                int index = first.getValue().offsetByCodePoints(0, Math.abs(second.getValue()) - 1);
                 return castStringLikeLiteral(first, first.getValue().substring(
-                    Math.abs(index) - 1, inputLength));
+                    index, inputLength));
             }
         }
     }
@@ -337,7 +347,7 @@ public class StringArithmetic {
      */
     @ExecFunction(name = "locate")
     public static Expression locate(StringLikeLiteral first, StringLikeLiteral second) {
-        return new IntegerLiteral(second.getValue().indexOf(first.getValue()) + 1);
+        return locate(first, second, new IntegerLiteral(1));
     }
 
     /**
@@ -345,12 +355,23 @@ public class StringArithmetic {
      */
     @ExecFunction(name = "locate")
     public static Expression locate(StringLikeLiteral first, StringLikeLiteral second, IntegerLiteral third) {
-        int result = second.getValue().indexOf(first.getValue()) + 1;
-        if (third.getValue() <= 0 || !substringImpl(second.getValue(), third.getValue(),
-                second.getValue().codePointCount(0, second.getValue().length())).contains(first.getValue())) {
-            result = 0;
+        String searchStr = first.getValue();
+        String targetStr = second.getValue();
+        int startPos = third.getValue();
+        if (searchStr.isEmpty()) {
+            int byteLength = targetStr.getBytes(StandardCharsets.UTF_8).length;
+            return (startPos >= 1 && startPos <= byteLength)
+                    ? new IntegerLiteral(startPos)
+                    : new IntegerLiteral(startPos == 1 ? 1 : 0);
         }
-        return new IntegerLiteral(result);
+
+        int strLength = targetStr.codePointCount(0, targetStr.length());
+        if (startPos < 1 || startPos > strLength) {
+            return new IntegerLiteral(0);
+        }
+        int offset = targetStr.offsetByCodePoints(0, startPos - 1);
+        int loc = targetStr.indexOf(searchStr, offset);
+        return loc == -1 ? new IntegerLiteral(0) : new IntegerLiteral(targetStr.codePointCount(0, loc) + 1);
     }
 
     /**
@@ -403,7 +424,7 @@ public class StringArithmetic {
      * Executable arithmetic functions ConcatWs
      */
     @ExecFunction(name = "concat_ws")
-    public static Expression concatWsVarcharVarchar(StringLikeLiteral first, VarcharLiteral... second) {
+    public static Expression concatWsVarcharVarchar(StringLikeLiteral first, StringLikeLiteral... second) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < second.length - 1; i++) {
             sb.append(second[i].getValue());
@@ -467,7 +488,7 @@ public class StringArithmetic {
      * Executable arithmetic functions md5
      */
     @ExecFunction(name = "md5sum")
-    public static Expression md5Sum(VarcharLiteral... first) {
+    public static Expression md5Sum(StringLikeLiteral... first) {
         try {
             // Step 1: Create a MessageDigest instance for MD5
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -609,7 +630,7 @@ public class StringArithmetic {
      * Executable arithmetic functions field
      */
     @ExecFunction(name = "field")
-    public static Expression fieldVarchar(StringLikeLiteral first, VarcharLiteral... second) {
+    public static Expression fieldVarchar(StringLikeLiteral first, StringLikeLiteral... second) {
         return new IntegerLiteral(compareLiteral(first, second));
     }
 

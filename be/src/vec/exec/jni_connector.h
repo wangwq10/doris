@@ -93,7 +93,7 @@ public:
     struct ScanPredicate {
         ScanPredicate() = default;
         ~ScanPredicate() = default;
-        const std::string column_name;
+        std::string column_name;
         SQLFilterOp op;
         std::vector<const CppType*> values;
         int scale;
@@ -222,7 +222,8 @@ public:
      * number_filters(4) | length(4) | column_name | op(4) | scale(4) | num_values(4) | value_length(4) | value | ...
      * Then, pass the byte array address in configuration map, like "push_down_predicates=${address}"
      */
-    Status init(std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+    Status init(
+            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
 
     /**
      * Call java side function JniScanner.getNextBatchMeta. The columns information are stored as long array:
@@ -353,7 +354,7 @@ private:
     }
 
     void _generate_predicates(
-            std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
+            const std::unordered_map<std::string, ColumnValueRangeType>* colname_to_value_range);
 
     template <PrimitiveType primitive_type>
     void _parse_value_range(const ColumnValueRange<primitive_type>& col_val_range,
